@@ -5,6 +5,7 @@ import dev.skycraft.combat.SkyCombat;
 import dev.skycraft.combat.SkyrimActorEntity;
 import dev.skycraft.link.Proto;
 import dev.skycraft.link.SkyLink;
+import net.minecraft.core.BlockPos;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.server.level.ServerPlayer;
@@ -80,6 +81,32 @@ public abstract class ServerPlayerMixin {
 		if (SkyLink.active()) {
 			SkyLink.pushEvent(Proto.EV_PLAYER_DIED, attacker, 0, 0, 0, 0, 0);
 			SkyCraft.LOG.info("SkyCraft: player died ({}); telling Skyrim", source.getMsgId());
+		}
+	}
+
+	/**
+	 * SkyCraft+ : v36. A Minecraft bed the player slept in opens Skyrim's own sleep menu (how long to
+	 * sleep), as a bed of Skyrim's does, and the world's clock moves when they wake. Minecraft's own
+	 * sleep runs beside it (respawn point, the night's rest); its clock is the host's Skyrim's, so it
+	 * never skips the night itself (ADVANCE_TIME is off).
+	 */
+	@Inject(method = "startSleeping(Lnet/minecraft/core/BlockPos;)Z", at = @At("RETURN"))
+	private void skycraft$sleptInBed(BlockPos pos, CallbackInfoReturnable<Boolean> cir) {
+		ServerPlayer self = (ServerPlayer) (Object) this;
+		if (!self.isSleeping()) {
+			return;  // the bed refused it (a rule, or something in the way): no sleep, no menu
+		}
+		dev.skycraft.net.SkyNet.sleptInBed(self);  // Skyrim's own sleep menu is what wakes them again
+		if (!dev.skycraft.net.SkyNet.isHost(self)) {
+			if (net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking.canSend(self, dev.skycraft.net.SkyNet.Sleep.TYPE)) {
+				net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking.send(self, new dev.skycraft.net.SkyNet.Sleep(pos));
+			}
+			SkyCraft.LOG.info("SkyCraft: guest {} slept in a Minecraft bed; telling their Skyrim", self.getPlainTextName());
+			return;
+		}
+		if (SkyLink.active()) {
+			SkyLink.pushEvent(Proto.EV_SLEEP, 0, 0, 0, 0, 0, 0);
+			SkyCraft.LOG.info("SkyCraft: slept in a Minecraft bed at {}; Skyrim's sleep menu", pos.toShortString());
 		}
 	}
 }

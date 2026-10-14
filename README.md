@@ -47,6 +47,14 @@ first, install the zip the same way, and start a **new Minecraft world** to get 
 - Mobs walk Skyrim's terrain properly, and Skyrim's NPCs walk on, step up and path around your
   blocks.
 
+**Sleeping**
+- Use a **Minecraft bed** and Skyrim's own sleep menu opens (how long to sleep), as it does for a bed
+  of Skyrim's; Minecraft's own bed rules apply beside it (respawn point and the night's rest).
+- A sleep or a wait moves the **clock everyone shares** (Minecraft's, which the host's Skyrim
+  drives), so in multiplayer everyone wakes at the same hour. `sleepSync=false` in
+  `skycraft.properties` keeps each Skyrim on its own time instead.
+- Beds work at any hour, as Skyrim's do.
+
 **The real Minecraft underground**
 - Dig down anywhere and you're in real Minecraft terrain: caves, ores at the right depths,
   mineshafts, dungeons, trial chambers, ancient cities and the stronghold.

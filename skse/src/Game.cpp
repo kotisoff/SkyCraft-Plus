@@ -3,6 +3,7 @@
 #include "Collision.h"
 #include "Dig.h"
 #include "Perf.h"
+#include "Sleep.h"
 
 namespace skycraft
 {
@@ -1729,6 +1730,7 @@ namespace skycraft
 			sky.viewportW = static_cast<std::uint32_t>(st.viewportW.load());
 			sky.viewportH = static_cast<std::uint32_t>(st.viewportH.load());
 			if (auto* calendar = RE::Calendar::GetSingleton()) {
+				Sleep::PerFrame(haveMc ? mc.worldHour : -1.0f);  // SkyCraft+ : the shared world clock
 				sky.gameHour = calendar->GetHour();
 			}
 			link.WriteSkyState(sky);
@@ -2047,6 +2049,7 @@ namespace skycraft
 
 			Collision::Get().Start();
 			Combat::Install();
+			Sleep::Install();
 			logger::info("game hooks installed");
 		}
 

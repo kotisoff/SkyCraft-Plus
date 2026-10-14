@@ -8,7 +8,7 @@ public final class Proto {
 	}
 
 	public static final int MAGIC = 0x43594B53;
-	public static final int VERSION = 35;
+	public static final int VERSION = 36;
 	// A second client on the same PC (multiplayer testing) talks to its own stand-in Skyrim:
 	// -Dskycraft.link=Local\SkyCraft_guest (see tools/fake_guest.py).
 	public static final String MAPPING_NAME = System.getProperty("skycraft.link", "Local\\SkyCraft_v1");
@@ -51,6 +51,7 @@ public final class Proto {
 	public static final int IN_SKYRIM_HIT = 10;
 	public static final int IN_HEAL = 11;
 	public static final int IN_SLOT_JUMP = 12; // SkyCraft+ : v34, a, b = x, y step to the next slot
+	public static final int IN_SLEPT = 13; // SkyCraft+ : v36, a = the hour Skyrim woke at, * 100
 	public static final int SKYRIM_HIT_POWER = 1, SKYRIM_HIT_BASH = 1 << 1, SKYRIM_HIT_LEFT = 1 << 2;
 	public static final int HURT_MELEE = 0;
 	public static final int HURT_PROJECTILE = 1;
@@ -82,6 +83,7 @@ public final class Proto {
 	public static final int EV_ARROW_STUCK = 4;
 	public static final int EV_SKILL_USE = 5;
 	public static final int EV_PLAYER_HURT = 6;
+	public static final int EV_SLEEP = 7; // SkyCraft+ : v36, a Minecraft bed was used: open Skyrim's sleep menu
 	// Skyrim skills (ActorValue) Minecraft reports use of; weapon skills come from EV_HIT_ACTOR.
 	public static final int SKILL_BLOCK = 9;
 	public static final int SKILL_SMITHING = 10;
@@ -202,6 +204,7 @@ public final class Proto {
 	public static final long MS_FOV = 0x40;
 	public static final long MS_BOB_PHASE = 0x44;
 	public static final long MS_BOB_AMOUNT = 0x48;
+	public static final long MS_WORLD_HOUR = 0x4C; // SkyCraft+ : v36, the shared hour of day (0..24), < 0 unknown
 	public static final long MS_EYE_X = 0x50;
 	public static final long MS_EYE_Y = 0x58;
 	public static final long MS_EYE_Z = 0x60;

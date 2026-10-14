@@ -1,4 +1,5 @@
 #include "Game.h"
+#include "Sleep.h"
 
 namespace skycraft
 {
@@ -1009,6 +1010,8 @@ namespace skycraft
 				while (link.PopEvent(ev)) {
 					if (ev.type == proto::kEvPlayerDied && link.McAlive()) {
 						KillPlayer(a_player, ev);
+					} else if (ev.type == proto::kEvSleep) {
+						Sleep::OpenMenu();  // SkyCraft+ : a Minecraft bed, in Skyrim mode
 					} else if (ev.type == proto::kEvPlayerHurt && link.McAlive() && !a_player->IsDead()) {
 						// SkyCraft+ : Skyrim mode: a Minecraft mob hit the player. One health pool:
 						// the share of Minecraft's health it took, of Skyrim's.
@@ -1040,6 +1043,9 @@ namespace skycraft
 					break;
 				case proto::kEvPlayerDied:
 					KillPlayer(a_player, ev);
+					break;
+				case proto::kEvSleep:
+					Sleep::OpenMenu();  // SkyCraft+ : a Minecraft bed was used
 					break;
 				case proto::kEvExplosion:
 					pendingExplosions.push_back({ McToSky(ev.a, ev.b, ev.c), ev.d, 0.25f });

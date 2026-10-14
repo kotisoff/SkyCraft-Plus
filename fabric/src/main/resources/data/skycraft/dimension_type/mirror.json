@@ -3,7 +3,7 @@
   "attributes": {
     "minecraft:gameplay/bed_rule": {
       "can_set_spawn": "always",
-      "can_sleep": "when_dark",
+      "can_sleep": "always",
       "error_message": { "translate": "block.minecraft.bed.no_sleep" }
     },
     "minecraft:gameplay/respawn_anchor_works": false,

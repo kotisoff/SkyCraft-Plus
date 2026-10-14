@@ -71,6 +71,8 @@ public final class InputBridge {
 				}
 			}
 			case Proto.IN_USE -> SkyClient.useBlockInView(minecraft);
+			// SkyCraft+ : v36. Skyrim slept or waited: the world's clock moves to where it woke.
+			case Proto.IN_SLEPT -> SkyClient.slept(minecraft, code, a / 100.0F);
 			// SkyCraft+ : a Skyrim healing spell or potion heals Minecraft's hearts (one health pool).
 			case Proto.IN_HEAL -> SkyClient.act(minecraft, dev.skycraft.net.SkyNet.Act.simple(dev.skycraft.net.SkyNet.Act.HEAL, 0, a / 10000.0F, 0.0F));
 			case Proto.IN_SKYRIM_HIT -> {

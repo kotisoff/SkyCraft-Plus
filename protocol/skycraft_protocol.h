@@ -13,7 +13,7 @@
 namespace skycraft::proto
 {
 	inline constexpr std::uint32_t kMagic = 0x43594B53;  // "SKYC"
-	inline constexpr std::uint32_t kVersion = 35;
+	inline constexpr std::uint32_t kVersion = 36;
 	inline constexpr wchar_t       kMappingName[] = L"Local\\SkyCraft_v1";
 
 	// 1 Minecraft block == 70 Skyrim units (Skyrim player ~128 units tall, MC player 1.8 blocks).
@@ -206,7 +206,10 @@ namespace skycraft::proto
 		float         fovDeg;         // effective vertical FOV (includes sprint / fluid modifiers)
 		float         bobPhase;       // MC walk-bob phase (interpolated walk distance); 0 if bobbing is off
 		float         bobAmount;      // MC walk-bob amplitude
-		std::uint32_t pad4C;
+		// SkyCraft+ : v36. The shared hour of day (0..24), Minecraft's own world clock, which the host's
+		// Skyrim drives. Skyrim brings its own clock to it when the two drift apart (a sleep anywhere);
+		// negative = unknown (not in a world, or the sync is off).
+		float         worldHour;
 		double        eyeX, eyeY, eyeZ;  // MC camera position (interpolated, includes sneak eye lerp)
 
 		// Raw 20 Hz physics ticks, so Skyrim can interpolate on its own frame clock exactly like
@@ -291,6 +294,10 @@ namespace skycraft::proto
 		kInHeal = 11,        // a Skyrim healing effect healed the player: a = share of max health * 10000
 		kInSlotJump = 12,    // SkyCraft+ : v34. In a screen with slots, the cursor jumps to the next slot that way:
 		                     // a = x step (-1, 0, 1), b = y step (down is +1)
+		// SkyCraft+ : v36. A Skyrim sleep or wait finished (a bed or its own wait key): a = the hour of
+		// day it woke at * 100 (0..2400). Minecraft's world clock moves there, so everyone's Skyrim
+		// wakes to the same morning.
+		kInSlept = 13,
 	};
 
 	enum HurtKind : std::uint16_t
@@ -360,6 +367,9 @@ namespace skycraft::proto
 		                    // 10 Smithing, 11 Heavy Armor, 12 Light Armor), a = uses (as Skyrim's AdvanceSkill counts them)
 		kEvPlayerHurt = 6,  // Skyrim mode: a Minecraft mob or explosion hurt the player: a = share of Minecraft's max
 		                    // health it took; Skyrim takes that share of its own
+		// SkyCraft+ : v36. The player used a Minecraft bed: Skyrim opens its sleep menu (hours), as it
+		// does for a bed of its own. Minecraft's own sleep runs alongside it (spawn point, phantom).
+		kEvSleep = 7,
 	};
 
 	// InputEvent::code for kInSkyrimHit.
