@@ -116,6 +116,7 @@ public final class SkyClient {
 			}
 		}
 		if (!linked) {
+			openStandaloneWhenDue(Minecraft.getInstance());
 			return;
 		}
 
@@ -225,10 +226,55 @@ public final class SkyClient {
 	private static final long STARTED_AT = System.currentTimeMillis();
 	private static boolean gaveUpWaiting;
 
+	// Linux bridge only (Windows untouched): Skyrim is started by hand there, so Minecraft can come
+	// up without it. Rather than wait on the title screen forever, after a grace period a normal
+	// Minecraft world opens and a chat note explains why. -Dskycraft.standalone=true (or
+	// SKYCRAFT_STANDALONE) skips the wait; skycraft.standaloneAfterMs / SKYCRAFT_STANDALONE_AFTER_MS
+	// change the grace period (ms).
+	private static final boolean STANDALONE_ALLOWED = !SkyLink.isWindows();
+	private static final boolean STANDALONE_NOW =
+		Boolean.getBoolean("skycraft.standalone") || System.getenv("SKYCRAFT_STANDALONE") != null;
+	private static final long STANDALONE_AFTER_MS = standaloneAfterMs();
+	private static boolean standalone;
+
+	private static long standaloneAfterMs() {
+		String value = System.getProperty("skycraft.standaloneAfterMs");
+		if (value == null) {
+			value = System.getenv("SKYCRAFT_STANDALONE_AFTER_MS");
+		}
+		try {
+			return value != null ? Long.parseLong(value.trim()) : 60_000L;
+		} catch (NumberFormatException e) {
+			return 60_000L;
+		}
+	}
+
+	/**
+	 * Linux bridge without Skyrim: open a normal Minecraft world (the mod's content, no Skyrim
+	 * terrain) after the grace period, and say so in chat. Never runs on Windows, where Skyrim
+	 * starts Minecraft and the link is expected.
+	 */
+	private static void openStandaloneWhenDue(Minecraft minecraft) {
+		if (!STANDALONE_ALLOWED) {
+			return;
+		}
+		if (!standalone) {
+			if (!STANDALONE_NOW && System.currentTimeMillis() - STARTED_AT < STANDALONE_AFTER_MS) {
+				return;
+			}
+			standalone = true;
+			SkyCraft.LOG.warn("SkyCraft: no Skyrim link; opening a normal Minecraft world (standalone)");
+			MirrorWorld.setStandalone(true);
+			MirrorWorld.setPendingNote("SkyCraft: Skyrim isn't connected, so a normal Minecraft world opened. "
+				+ "Start Skyrim with the SkyCraft SKSE plugin and restart Minecraft to play in Skyrim's world.");
+		}
+		MirrorWorld.openWhenReady(minecraft);
+	}
+
 	private static void quitWithSkyrim(Minecraft minecraft) {
 		int pid = SkyLink.skyrimPid();
 		long now = System.currentTimeMillis();
-		if (QUIT_WITH_SKYRIM && START_HIDDEN && pid == 0 && !tookOver && !gaveUpWaiting && now - STARTED_AT > NEVER_CONNECTED_QUIT_MS) {
+		if (QUIT_WITH_SKYRIM && START_HIDDEN && pid == 0 && !tookOver && !standalone && !gaveUpWaiting && now - STARTED_AT > NEVER_CONNECTED_QUIT_MS) {
 			gaveUpWaiting = true;
 			SkyCraft.LOG.warn("SkyCraft: started hidden but Skyrim never connected in {} minutes; quitting", NEVER_CONNECTED_QUIT_MS / 60000);
 			minecraft.stop();
@@ -340,6 +386,15 @@ public final class SkyClient {
 		boolean rightMain = player.getMainArm() == net.minecraft.world.entity.HumanoidArm.RIGHT;
 		var right = rightMain ? player.getMainHandItem() : player.getOffhandItem();
 		var left = rightMain ? player.getOffhandItem() : player.getMainHandItem();
+		// SkyCraft+ : Skyrim shortcuts. One that goes into a hand is Skyrim's there, not a Minecraft item:
+		// picking it equips the Skyrim thing, which the change mustn't take out again.
+		boolean rightShortcut = SkyShortcutsClient.equipsShortcut(right), leftShortcut = SkyShortcutsClient.equipsShortcut(left);
+		if (rightShortcut) {
+			right = net.minecraft.world.item.ItemStack.EMPTY;
+		}
+		if (leftShortcut) {
+			left = net.minecraft.world.item.ItemStack.EMPTY;
+		}
 		int slot = player.getInventory().getSelectedSlot();
 		boolean rightChanged = !net.minecraft.world.item.ItemStack.isSameItem(right, lastRight);
 		boolean leftChanged = !net.minecraft.world.item.ItemStack.isSameItem(left, lastLeft);
@@ -348,10 +403,10 @@ public final class SkyClient {
 		boolean byHand = minecraft.gui.screen() != null || swapped;
 		if (lastSlot >= 0) {
 			boolean mainSlot = slot != lastSlot;
-			if (rightMain && mainSlot || rightChanged && byHand) {
+			if ((rightMain && mainSlot || rightChanged && byHand) && !rightShortcut) {
 				rightChanges++;
 			}
-			if (!rightMain && mainSlot || leftChanged && byHand) {
+			if ((!rightMain && mainSlot || leftChanged && byHand) && !leftShortcut) {
 				leftChanges++;
 			}
 		}
@@ -695,8 +750,12 @@ public final class SkyClient {
 			mc.cursorSeq = InputBridge.jumpSeq;
 			mc.cursorX = InputBridge.jumpX;
 			mc.cursorY = InputBridge.jumpY;
-		} else if (player != null && SkyHands.usableTargetInView(minecraft)) {
-			flags |= Proto.MC_USE_TARGET;
+		} else if (player != null && (SkyHands.usableTargetInView(minecraft) || SkyShortcutsClient.usableInHand(player))) {
+			flags |= Proto.MC_USE_TARGET;  // (SkyCraft+ : Skyrim shortcuts: a potion's right click is Minecraft's too)
+		}
+		// SkyCraft+ : Skyrim's inventory in Minecraft's (and the shortcuts' counts). Skyrim keeps its list current meanwhile.
+		if (SkyShortcutsClient.wanted()) {
+			flags |= Proto.MC_WANTS_SKY_INVENTORY;
 		}
 		// SkyCraft+ : the underground. Under Skyrim's land, by the land heights it has sent (where it
 		// hasn't sent any around here yet, as before).

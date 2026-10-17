@@ -21,15 +21,23 @@ public final class SkyLink {
 	private static final int FILE_MAP_ALL_ACCESS = 0xF001F;
 	// Skyrim's loading screens can stall its heartbeat for several seconds.
 	private static final long HEARTBEAT_TIMEOUT_MS = 8000;
+	// Linux bridge: same PC, Skyrim via Proton + native Linux Minecraft. Windows code below is
+	// untouched; on non-Windows we use a file mapping instead of the Win32 Local\ namespace.
+	// (The SKSE plugin still builds as a Windows DLL; under Proton it opens the same file as
+	// Z:\dev\shm\skycraft_v1. See Proto.LINUX_SHM_PATH.)
+	private static final boolean IS_WINDOWS =
+		System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win");
 
 	private static final VarHandle INT = JAVA_INT.varHandle();
 	private static final VarHandle LONG = JAVA_LONG.varHandle();
 
 	private static final MethodHandle OPEN_FILE_MAPPING;
 	// OpenFileMappingW's GetLastError, captured right after the call (the JVM may change it later).
-	private static final java.lang.foreign.StructLayout CALL_STATE = Linker.Option.captureStateLayout();
-	private static final VarHandle LAST_ERROR = CALL_STATE.varHandle(java.lang.foreign.MemoryLayout.PathElement.groupElement("GetLastError"));
-	private static final MemorySegment OPEN_STATE = Arena.global().allocate(CALL_STATE);
+	// Windows only: elsewhere the capture layout is errno, not GetLastError, so these stay null.
+	private static final java.lang.foreign.StructLayout CALL_STATE = IS_WINDOWS ? Linker.Option.captureStateLayout() : null;
+	private static final VarHandle LAST_ERROR = IS_WINDOWS
+		? CALL_STATE.varHandle(java.lang.foreign.MemoryLayout.PathElement.groupElement("GetLastError")) : null;
+	private static final MemorySegment OPEN_STATE = IS_WINDOWS ? Arena.global().allocate(CALL_STATE) : null;
 	private static int lastOpenError = -1;
 	private static final MethodHandle MAP_VIEW_OF_FILE;
 	private static final MethodHandle GET_TICK_COUNT64;
@@ -39,28 +47,47 @@ public final class SkyLink {
 	private static final MethodHandle CREATE_MUTEX;
 	private static MemorySegment runningMutex;
 	private static final MemorySegment QPC_OUT = Arena.global().allocate(JAVA_LONG);
+	// Linux bridge state (Windows ignores these): the mapped file + a lock file held while running.
+	private static java.nio.channels.FileChannel linuxChannel;
+	private static java.nio.channels.FileLock linuxRunningLock;
+	private static java.io.RandomAccessFile linuxLockFile;
 
 	static {
-		Linker linker = Linker.nativeLinker();
-		SymbolLookup k32 = SymbolLookup.libraryLookup("kernel32", Arena.global());
-		OPEN_FILE_MAPPING = linker.downcallHandle(
-			k32.find("OpenFileMappingW").orElseThrow(), FunctionDescriptor.of(ADDRESS, JAVA_INT, JAVA_INT, ADDRESS), Linker.Option.captureCallState("GetLastError")
-		);
-		MAP_VIEW_OF_FILE = linker.downcallHandle(
-			k32.find("MapViewOfFile").orElseThrow(), FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG)
-		);
-		GET_TICK_COUNT64 = linker.downcallHandle(k32.find("GetTickCount64").orElseThrow(), FunctionDescriptor.of(JAVA_LONG));
-		GET_CURRENT_PROCESS_ID = linker.downcallHandle(k32.find("GetCurrentProcessId").orElseThrow(), FunctionDescriptor.of(JAVA_INT));
-		QUERY_PERFORMANCE_COUNTER = linker.downcallHandle(k32.find("QueryPerformanceCounter").orElseThrow(), FunctionDescriptor.of(JAVA_INT, ADDRESS));
-		QUERY_PERFORMANCE_FREQUENCY = linker.downcallHandle(k32.find("QueryPerformanceFrequency").orElseThrow(), FunctionDescriptor.of(JAVA_INT, ADDRESS));
-		CREATE_MUTEX = linker.downcallHandle(k32.find("CreateMutexW").orElseThrow(), FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT, ADDRESS));
+		if (IS_WINDOWS) {
+			Linker linker = Linker.nativeLinker();
+			SymbolLookup k32 = SymbolLookup.libraryLookup("kernel32", Arena.global());
+			OPEN_FILE_MAPPING = linker.downcallHandle(
+				k32.find("OpenFileMappingW").orElseThrow(), FunctionDescriptor.of(ADDRESS, JAVA_INT, JAVA_INT, ADDRESS), Linker.Option.captureCallState("GetLastError")
+			);
+			MAP_VIEW_OF_FILE = linker.downcallHandle(
+				k32.find("MapViewOfFile").orElseThrow(), FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG)
+			);
+			GET_TICK_COUNT64 = linker.downcallHandle(k32.find("GetTickCount64").orElseThrow(), FunctionDescriptor.of(JAVA_LONG));
+			GET_CURRENT_PROCESS_ID = linker.downcallHandle(k32.find("GetCurrentProcessId").orElseThrow(), FunctionDescriptor.of(JAVA_INT));
+			QUERY_PERFORMANCE_COUNTER = linker.downcallHandle(k32.find("QueryPerformanceCounter").orElseThrow(), FunctionDescriptor.of(JAVA_INT, ADDRESS));
+			QUERY_PERFORMANCE_FREQUENCY = linker.downcallHandle(k32.find("QueryPerformanceFrequency").orElseThrow(), FunctionDescriptor.of(JAVA_INT, ADDRESS));
+			CREATE_MUTEX = linker.downcallHandle(k32.find("CreateMutexW").orElseThrow(), FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT, ADDRESS));
+		} else {
+			OPEN_FILE_MAPPING = null;
+			MAP_VIEW_OF_FILE = null;
+			GET_TICK_COUNT64 = null;
+			GET_CURRENT_PROCESS_ID = null;
+			QUERY_PERFORMANCE_COUNTER = null;
+			QUERY_PERFORMANCE_FREQUENCY = null;
+			CREATE_MUTEX = null;
+		}
 	}
 
 	/**
 	 * Holds a named mutex ("<link name>_minecraft") for as long as this Minecraft runs, so Skyrim's
 	 * SKSE plugin knows not to start another one (even before the two have linked up).
+	 * On Linux this is a lock file (Proto.LINUX_SHM_PATH + ".lock") instead; Windows path unchanged.
 	 */
 	public static synchronized void announceRunning() {
+		if (!IS_WINDOWS) {
+			announceRunningLinux();
+			return;
+		}
 		if (runningMutex != null) {
 			return;
 		}
@@ -72,12 +99,36 @@ public final class SkyLink {
 		}
 	}
 
+	private static synchronized void announceRunningLinux() {
+		if (linuxRunningLock != null) {
+			return;
+		}
+		try {
+			java.nio.file.Path lockPath = java.nio.file.Path.of(LINUX_SHM_PATH + ".lock");
+			java.nio.file.Files.createDirectories(lockPath.toAbsolutePath().getParent());
+			linuxLockFile = new java.io.RandomAccessFile(lockPath.toFile(), "rw");
+			linuxRunningLock = linuxLockFile.getChannel().tryLock();
+			if (linuxRunningLock == null) {
+				SkyCraft.LOG.warn("SkyCraft: lock file {} is already held (another Minecraft?)", lockPath);
+				linuxLockFile.close();
+				linuxLockFile = null;
+			}
+		} catch (Throwable t) {
+			SkyCraft.LOG.warn("SkyCraft: couldn't create the running-Minecraft lock file", t);
+		}
+	}
+
 	private static volatile MemorySegment shm;
 	private static long lastOpenAttempt;
 	private static int skyrimPid;
 	private static volatile int generation;
 
 	private SkyLink() {
+	}
+
+	/** False on Linux (and macOS), where the file-backed bridge and the standalone fallback apply. */
+	public static boolean isWindows() {
+		return IS_WINDOWS;
 	}
 
 	/** True when a live Skyrim is on the other end. Cheap; safe from any thread. */
@@ -107,6 +158,10 @@ public final class SkyLink {
 
 	/** Try to open the mapping at most once a second. Call regularly from the render thread. */
 	public static void poll() {
+		if (!IS_WINDOWS) {
+			pollLinux();
+			return;
+		}
 		if (shm != null) {
 			LONG.setRelease(shm, OFF_HEADER + H_MC_HEARTBEAT, tickCount());
 			int pid = shm.get(JAVA_INT, OFF_HEADER + H_SKYRIM_PID);
@@ -161,8 +216,72 @@ public final class SkyLink {
 		}
 	}
 
+	// Linux bridge: open the file mapping (created by Skyrim under Proton, or by
+	// tools/fake_skyrim.py for testing). Layout is byte-identical to the Windows mapping.
+	private static void pollLinux() {
+		if (shm != null) {
+			LONG.setRelease(shm, OFF_HEADER + H_MC_HEARTBEAT, tickCount());
+			int pid = shm.get(JAVA_INT, OFF_HEADER + H_SKYRIM_PID);
+			if (pid != skyrimPid) {
+				skyrimPid = pid;
+				overlayBack = 1;
+				generation++;
+				SkyCraft.LOG.info("SkyCraft: Skyrim instance changed (pid {})", pid);
+			}
+			return;
+		}
+		long now = System.currentTimeMillis();
+		if (now - lastOpenAttempt < 1000) {
+			return;
+		}
+		lastOpenAttempt = now;
+		java.nio.file.Path path = java.nio.file.Path.of(LINUX_SHM_PATH);
+		if (!java.nio.file.Files.exists(path)) {
+			if (lastOpenError != 2) {
+				lastOpenError = 2;
+				SkyCraft.LOG.info("SkyCraft: can't open {} yet: Skyrim hasn't created it yet", path);
+			}
+			return;
+		}
+		try {
+			long size = java.nio.file.Files.size(path);
+			if (size < MAPPING_BYTES) {
+				if (lastOpenError != 3) {
+					lastOpenError = 3;
+					SkyCraft.LOG.info("SkyCraft: {} is {} bytes, expected {} (Skyrim still creating it?)", path, size, MAPPING_BYTES);
+				}
+				return;
+			}
+			if (linuxChannel == null) {
+				linuxChannel = java.nio.channels.FileChannel.open(path,
+					java.nio.file.StandardOpenOption.READ, java.nio.file.StandardOpenOption.WRITE);
+			}
+			java.nio.MappedByteBuffer mapped =
+				linuxChannel.map(java.nio.channels.FileChannel.MapMode.READ_WRITE, 0, MAPPING_BYTES);
+			MemorySegment seg = MemorySegment.ofBuffer(mapped).reinterpret(MAPPING_BYTES);
+			int magic = seg.get(JAVA_INT, OFF_HEADER + H_MAGIC);
+			int version = seg.get(JAVA_INT, OFF_HEADER + H_VERSION);
+			if (magic != MAGIC || version != VERSION) {
+				SkyCraft.LOG.error("SkyCraft: protocol mismatch (magic {} version {}); expected version {}", Integer.toHexString(magic), version, VERSION);
+				return;
+			}
+			seg.set(JAVA_INT, OFF_HEADER + H_MC_PID, (int) ProcessHandle.current().pid());
+			LONG.setRelease(seg, OFF_HEADER + H_MC_HEARTBEAT, tickCount());
+			skyrimPid = seg.get(JAVA_INT, OFF_HEADER + H_SKYRIM_PID);
+			generation++;
+			shm = seg;
+			SkyCraft.LOG.info("SkyCraft: linked to Skyrim via {} (pid {})", path, seg.get(JAVA_INT, OFF_HEADER + H_SKYRIM_PID));
+		} catch (Throwable t) {
+			SkyCraft.LOG.error("SkyCraft: failed to open shared memory file", t);
+		}
+	}
+
 	/** QueryPerformanceCounter: the same clock Skyrim reads, so tick timestamps line up across processes. */
 	public static synchronized long qpc() {
+		if (!IS_WINDOWS) {
+			// Wine's QPC is CLOCK_MONOTONIC at 10 MHz; nanoTime() is the same clock in nanos.
+			return System.nanoTime() / 100L;
+		}
 		try {
 			int ok = (int) QUERY_PERFORMANCE_COUNTER.invokeExact(QPC_OUT);
 			return QPC_OUT.get(JAVA_LONG, 0);
@@ -173,6 +292,9 @@ public final class SkyLink {
 
 	/** Ticks per second of {@link #qpc()}. */
 	public static synchronized long qpcFrequency() {
+		if (!IS_WINDOWS) {
+			return 10_000_000L;
+		}
 		try {
 			int ok = (int) QUERY_PERFORMANCE_FREQUENCY.invokeExact(QPC_OUT);
 			return QPC_OUT.get(JAVA_LONG, 0);
@@ -182,6 +304,10 @@ public final class SkyLink {
 	}
 
 	public static long tickCount() {
+		if (!IS_WINDOWS) {
+			// GetTickCount64() is millis since boot (host monotonic); nanoTime() is the same clock.
+			return System.nanoTime() / 1_000_000L;
+		}
 		try {
 			return (long) GET_TICK_COUNT64.invokeExact();
 		} catch (Throwable t) {
@@ -252,6 +378,11 @@ public final class SkyLink {
 		/** SkyCraft+ : a Skyrim save in the open world was loaded: out of the Nether or the End to Skyrim's player. */
 		public boolean bringBack() {
 			return (this.flags & SKY_BRING_BACK) != 0;
+		}
+
+		/** SkyCraft+ : on a Skyrim horse in Skyrim's third-person camera: Skyrim draws Minecraft's body in the saddle. */
+		public boolean riding() {
+			return (this.flags & SKY_RIDING) != 0;
 		}
 	}
 
@@ -506,6 +637,94 @@ public final class SkyLink {
 		return false;
 	}
 
+	/** SkyCraft+ : one of the Skyrim player's items, spells, shouts or powers (see SkyItem in the protocol). */
+	public record SkyItem(int formId, int kind, int sub, int material, int count, int flags, float weight, int value, float stat, float stat2, String name, int localId, String plugin) {
+		public boolean has(int flag) {
+			return (this.flags & flag) != 0;
+		}
+
+		/** The same thing in any load order (and with another game started): plugin and id within it. */
+		public boolean is(String plugin, int localId) {
+			return this.localId == localId && this.plugin.equalsIgnoreCase(plugin);
+		}
+	}
+
+	/** SkyCraft+ : Skyrim's inventory as a whole (see SkyInventory in the protocol). */
+	public record SkyInventory(int generation, int gold, float carried, float carryMax, java.util.List<SkyItem> items) {
+	}
+
+	/** SkyCraft+ : SkyInventory::generation, to see whether there's anything new to read (-1 if the link is down). */
+	public static int skyInventoryGeneration() {
+		MemorySegment s = shm;
+		return s == null ? -1 : (int) INT.getAcquire(s, OFF_SKY_INVENTORY + INV_GENERATION);
+	}
+
+	/** SkyCraft+ : seqlock read of Skyrim's inventory; null if the link is down or Skyrim kept writing. */
+	public static @org.jspecify.annotations.Nullable SkyInventory readSkyInventory() {
+		MemorySegment s = shm;
+		if (s == null) {
+			return null;
+		}
+		long b = OFF_SKY_INVENTORY;
+		for (int attempt = 0; attempt < 16; attempt++) {
+			int seq1 = (int) INT.getAcquire(s, b + INV_SEQ);
+			if ((seq1 & 1) != 0) {
+				Thread.onSpinWait();
+				continue;
+			}
+			int count = Math.clamp(s.get(JAVA_INT, b + INV_COUNT), 0, MAX_SKY_ITEMS);
+			java.util.List<SkyItem> items = new java.util.ArrayList<>(count);
+			for (int i = 0; i < count; i++) {
+				long r = b + INV_ITEMS + (long) i * SKY_ITEM_BYTES;
+				items.add(new SkyItem(s.get(JAVA_INT, r), Byte.toUnsignedInt(s.get(JAVA_BYTE, r + 4)), Byte.toUnsignedInt(s.get(JAVA_BYTE, r + 5)),
+					Byte.toUnsignedInt(s.get(JAVA_BYTE, r + 6)), s.get(JAVA_INT, r + 8), s.get(JAVA_INT, r + 12), s.get(JAVA_FLOAT, r + 16), s.get(JAVA_INT, r + 20),
+					s.get(JAVA_FLOAT, r + 24), s.get(JAVA_FLOAT, r + 28), readName(s, r + 32, SKY_ITEM_NAME_BYTES),
+					s.get(JAVA_INT, r + 128), readName(s, r + 132, SKY_ITEM_PLUGIN_BYTES)));
+			}
+			SkyInventory inventory = new SkyInventory(s.get(JAVA_INT, b + INV_GENERATION), s.get(JAVA_INT, b + INV_GOLD), s.get(JAVA_FLOAT, b + INV_CARRIED),
+				s.get(JAVA_FLOAT, b + INV_CARRY_MAX), items);
+			VarHandle.loadLoadFence();
+			if ((int) INT.getAcquire(s, b + INV_SEQ) == seq1) {
+				return inventory;
+			}
+		}
+		return null;
+	}
+
+	/** SkyCraft+ : SkyIcons::generation, to see whether any picture changed (-1 if the link is down). */
+	public static int skyIconsGeneration() {
+		MemorySegment s = shm;
+		return s == null ? -1 : (int) INT.getAcquire(s, OFF_SKY_ICONS + ICONS_GENERATION);
+	}
+
+	/** SkyCraft+ : a picture slot's seq (even when settled; -1 if the link is down) and key, without its pixels. */
+	public static long skyIconHeader(int slot) {
+		MemorySegment s = shm;
+		if (s == null) {
+			return -1L;
+		}
+		long b = OFF_SKY_ICONS + ICONS_SLOTS + slot * ICON_SLOT_BYTES;
+		int seq = (int) INT.getAcquire(s, b + ICON_SEQ);
+		return (long) seq << 32 | Integer.toUnsignedLong(s.get(JAVA_INT, b + ICON_KEY));
+	}
+
+	/** SkyCraft+ : seqlock read of a picture slot's pixels (RGBA) into out; returns its key, or 0 if it changed meanwhile. */
+	public static int readSkyIcon(int slot, byte[] out) {
+		MemorySegment s = shm;
+		if (s == null) {
+			return 0;
+		}
+		long b = OFF_SKY_ICONS + ICONS_SLOTS + slot * ICON_SLOT_BYTES;
+		int seq1 = (int) INT.getAcquire(s, b + ICON_SEQ);
+		if ((seq1 & 1) != 0) {
+			return 0;
+		}
+		int key = s.get(JAVA_INT, b + ICON_KEY);
+		MemorySegment.copy(s, JAVA_BYTE, b + ICON_RGBA, out, 0, Math.min(out.length, SKY_ICON_SIZE * SKY_ICON_SIZE * 4));
+		VarHandle.loadLoadFence();
+		return (int) INT.getAcquire(s, b + ICON_SEQ) == seq1 ? key : 0;
+	}
+
 	public static boolean readActors(java.util.List<Actor> out) {
 		out.clear();
 		MemorySegment s = shm;
@@ -536,6 +755,71 @@ public final class SkyLink {
 			out.clear();
 		}
 		return false;
+	}
+
+	// ---- SkyCraft+ : Skyrim items in Minecraft's containers ----------------------------------
+
+	/** One answer from Skyrim to a store request (see SkyStoreResult in the protocol header). */
+	public record StoreResult(int id, int status, int kind, int sub, int material, int count, float health, float charge, int soul, int flags, float weight,
+		int value, float stat, float stat2, int localId, String plugin, String name, int formId) {
+	}
+
+	private static int nextStoreId = 1;
+
+	/** Asks Skyrim to take something out of its inventory (STORE_TAKE) or put it back (STORE_GIVE); returns the request's id, or 0 if it couldn't be sent. */
+	public static synchronized int pushStoreRequest(int op, int formId, int count, float health, float charge, int soul, int localId, String plugin) {
+		MemorySegment s = shm;
+		if (s == null) {
+			return 0;
+		}
+		long base = OFF_SKY_STORE;
+		long head = s.get(JAVA_LONG, base + STORE_REQ_HEAD);
+		long tail = (long) LONG.getAcquire(s, base + STORE_REQ_TAIL);
+		if (head - tail >= STORE_REQUESTS) {
+			return 0;
+		}
+		int id = nextStoreId++;
+		long e = base + STORE_REQ_DATA + (head & (STORE_REQUESTS - 1)) * STORE_REQUEST_BYTES;
+		s.asSlice(e, STORE_REQUEST_BYTES).fill((byte) 0);
+		s.set(JAVA_INT, e, id);
+		s.set(JAVA_BYTE, e + 4, (byte) op);
+		s.set(JAVA_INT, e + 8, formId);
+		s.set(JAVA_INT, e + 12, count);
+		s.set(JAVA_FLOAT, e + 16, health);
+		s.set(JAVA_FLOAT, e + 20, charge);
+		s.set(JAVA_INT, e + 24, soul);
+		s.set(JAVA_INT, e + 28, localId);
+		byte[] name = plugin.getBytes(StandardCharsets.UTF_8);
+		for (int i = 0; i < Math.min(name.length, SKY_ITEM_PLUGIN_BYTES - 1); i++) {
+			s.set(JAVA_BYTE, e + 32 + i, name[i]);
+		}
+		LONG.setRelease(s, base + STORE_REQ_HEAD, head + 1);
+		return id;
+	}
+
+	/** Skyrim's answers since last time (empty if none, or the link is down). */
+	public static synchronized java.util.List<StoreResult> popStoreResults() {
+		MemorySegment s = shm;
+		if (s == null) {
+			return java.util.List.of();
+		}
+		long base = OFF_SKY_STORE;
+		long head = (long) LONG.getAcquire(s, base + STORE_RES_HEAD);
+		long tail = s.get(JAVA_LONG, base + STORE_RES_TAIL);
+		if (tail >= head) {
+			return java.util.List.of();
+		}
+		java.util.List<StoreResult> out = new java.util.ArrayList<>();
+		for (; tail < head; tail++) {
+			long r = base + STORE_RES_DATA + (tail & (STORE_RESULTS - 1)) * STORE_RESULT_BYTES;
+			out.add(new StoreResult(s.get(JAVA_INT, r), Byte.toUnsignedInt(s.get(JAVA_BYTE, r + 4)), Byte.toUnsignedInt(s.get(JAVA_BYTE, r + 5)),
+				Byte.toUnsignedInt(s.get(JAVA_BYTE, r + 6)), Byte.toUnsignedInt(s.get(JAVA_BYTE, r + 7)), s.get(JAVA_INT, r + 8), s.get(JAVA_FLOAT, r + 12),
+				s.get(JAVA_FLOAT, r + 16), s.get(JAVA_INT, r + 20), s.get(JAVA_INT, r + 24), s.get(JAVA_FLOAT, r + 28), s.get(JAVA_INT, r + 32),
+				s.get(JAVA_FLOAT, r + 36), s.get(JAVA_FLOAT, r + 40), s.get(JAVA_INT, r + 44), readName(s, r + 48, SKY_ITEM_PLUGIN_BYTES),
+				readName(s, r + 108, SKY_ITEM_NAME_BYTES), s.get(JAVA_INT, r + 204)));
+		}
+		LONG.setRelease(s, base + STORE_RES_TAIL, head);
+		return out;
 	}
 
 	private static String readName(MemorySegment s, long off, int max) {
