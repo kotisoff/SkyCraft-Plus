@@ -341,6 +341,38 @@ public final class SkyClient {
 			(float) at.x, (float) at.y, (float) at.z));
 	}
 
+	/**
+	 * SkyCraft+ : v36. This player slept in a Minecraft bed: Skyrim opens its own sleep menu (how long
+	 * to sleep), as it does for a bed of its own. Minecraft's own sleep runs beside it (respawn point,
+	 * the night's rest).
+	 */
+	public static void sleptInBed(net.minecraft.core.BlockPos pos) {
+		if (SkyLink.active()) {
+			SkyLink.pushEvent(Proto.EV_SLEEP, 0, 0.0F, 0.0F, 0.0F, 0.0F, 0);
+			SkyCraft.LOG.info("SkyCraft: slept in a Minecraft bed at {}; Skyrim's sleep menu", pos.toShortString());
+		}
+	}
+
+	/**
+	 * SkyCraft+ : v36. Skyrim's sleep or wait ended: code 0, a = the hour it woke at (the clock
+	 * everyone shares moves there). Code 1: Skyrim's sleep menu closed with no sleep at all (it was
+	 * cancelled, or Skyrim refused it) - the body comes out of the Minecraft bed, no clock moves.
+	 */
+	public static void slept(Minecraft minecraft, int code, float hour) {
+		if (code == 1) {
+			SkyCraft.LOG.info("SkyCraft: no sleep; out of the Minecraft bed");
+			act(minecraft, dev.skycraft.net.SkyNet.Act.simple(dev.skycraft.net.SkyNet.Act.SLEPT, 0, -1.0F, 0.0F));
+			return;
+		}
+		SkyCraft.LOG.info("SkyCraft: Skyrim woke at {}", hour);
+		act(minecraft, dev.skycraft.net.SkyNet.Act.simple(dev.skycraft.net.SkyNet.Act.SLEPT, SleepSyncToggle.on ? 1 : 0, hour, 0.0F));
+	}
+
+	/** SkyCraft+ : v36. The shared world clock, the hour of day (0..24): Minecraft's own, which the host's Skyrim drives. */
+	private static float sharedHour(Minecraft minecraft) {
+		return dev.skycraft.world.SkyClock.hour(minecraft.level.getDefaultClockTime());
+	}
+
 	// SkyCraft+ : hand mixing. What each arm held last frame, and the player's changes counted.
 	private static int lastSlot = -1, rightChanges, leftChanges;
 	private static net.minecraft.world.item.ItemStack lastRight = net.minecraft.world.item.ItemStack.EMPTY, lastLeft = net.minecraft.world.item.ItemStack.EMPTY;
@@ -658,6 +690,7 @@ public final class SkyClient {
 		Minecraft minecraft = Minecraft.getInstance();
 		LocalPlayer player = minecraft.player;
 		int flags = 0;
+		mc.worldHour = -1.0F;  // SkyCraft+ : v36, the shared world clock (set below, with a world)
 		if (player != null && minecraft.level != null) {
 			float partial = minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(false);
 			Vec3 feet = player.getPosition(partial);
@@ -704,6 +737,9 @@ public final class SkyClient {
 			mc.healthFrac = player.getMaxHealth() > 0.0F ? Math.clamp(player.getHealth() / player.getMaxHealth(), 0.0F, 1.0F) : 0.0F;
 			mc.dimension = dimensionCode(minecraft.level.dimension());
 			mc.hands = handsCode(minecraft, player);  // SkyCraft+ : hand mixing
+			// SkyCraft+ : v36. The hour every Skyrim is brought to when they drift apart. Off, its own
+			// clock is its own business.
+			mc.worldHour = SleepSyncToggle.on ? sharedHour(minecraft) : -1.0F;
 		}
 		if (minecraft.gui.screen() != null) {
 			flags |= Proto.MC_SCREEN_OPEN;

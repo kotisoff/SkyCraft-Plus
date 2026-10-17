@@ -15,6 +15,7 @@ public final class SkyCraftClient implements ClientModInitializer {
 		WorldSwitcher.register(); // SkyCraft+ : world switcher
 		HandMixToggle.register(); // SkyCraft+ : hand mixing
 		RenderToggles.register(); // SkyCraft+ : experimental rendering switches
+		SleepSyncToggle.register(); // SkyCraft+ : sleep moves the world's clock
 		SkyInventoryPanels.register(); // SkyCraft+ : Skyrim's inventory in Minecraft's
 		SkyShortcutsClient.register(); // SkyCraft+ : Skyrim shortcuts
 		ClientTickEvents.END_CLIENT_TICK.register(SkyShortcutsClient::tick);
@@ -70,6 +71,9 @@ public final class SkyCraftClient implements ClientModInitializer {
 		// SkyCraft+ : held items in multiplayer. What other players' Skyrim hands hold.
 		net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking.registerGlobalReceiver(dev.skycraft.net.SkyNet.HandsOf.TYPE,
 			(payload, context) -> SkyHands.otherPlayerHands(payload.entityId(), payload.hands()));
+		// SkyCraft+ : Skyrim's own sleep menu for a Minecraft bed (v36).
+		net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking.registerGlobalReceiver(dev.skycraft.net.SkyNet.Sleep.TYPE,
+			(payload, context) -> SkyClient.sleptInBed(payload.pos()));
 		net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents.JOIN.register((handler, sender, minecraft) -> SkyHands.forgetOtherPlayers());
 		// Skyrim draws the real NPC; its Minecraft stand-in is only a hitbox.
 		EntityRendererRegistry.register(SkyCombat.SKYRIM_ACTOR, NoopRenderer::new);

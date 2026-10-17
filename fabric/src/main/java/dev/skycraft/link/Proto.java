@@ -8,7 +8,7 @@ public final class Proto {
 	}
 
 	public static final int MAGIC = 0x43594B53;
-	public static final int VERSION = 41;
+	public static final int VERSION = 42;
 	// A second client on the same PC (multiplayer testing) talks to its own stand-in Skyrim:
 	// -Dskycraft.link=Local\SkyCraft_guest (see tools/fake_guest.py).
 	public static final String MAPPING_NAME = System.getProperty("skycraft.link", "Local\\SkyCraft_v1");
@@ -89,6 +89,7 @@ public final class Proto {
 	public static final int IN_SKYRIM_HIT = 10;
 	public static final int IN_HEAL = 11;
 	public static final int IN_SLOT_JUMP = 12; // SkyCraft+ : v34, a, b = x, y step to the next slot
+	public static final int IN_SLEPT = 13; // SkyCraft+ : v42, a = the hour Skyrim woke at, * 100
 	public static final int SKYRIM_HIT_POWER = 1, SKYRIM_HIT_BASH = 1 << 1, SKYRIM_HIT_LEFT = 1 << 2;
 	public static final int HURT_MELEE = 0;
 	public static final int HURT_PROJECTILE = 1;
@@ -122,6 +123,7 @@ public final class Proto {
 	public static final int EV_PLAYER_HURT = 6;
 	public static final int EV_SKY_ITEM = 7; // SkyCraft+ : v35, flags = SKY_ACT_*
 	public static final int EV_DRAGON_SOUL = 8; // SkyCraft+ : v39, the Ender Dragon died near this player: a Skyrim dragon soul
+	public static final int EV_SLEEP = 9; // SkyCraft+ : v42, a Minecraft bed was used: open Skyrim's sleep menu
 	public static final int SKY_ACT_RIGHT = 1, SKY_ACT_LEFT = 2, SKY_ACT_USE = 3, SKY_ACT_MENU_STATS = 4, SKY_ACT_MENU_MAP = 5,
 		SKY_ACT_EQUIP_RIGHT = 6, SKY_ACT_EQUIP_LEFT = 7, SKY_ACT_DROP = 8, // SkyCraft+ : v36, shortcuts
 		SKY_ACT_UNEQUIP_RIGHT = 9, SKY_ACT_UNEQUIP_LEFT = 10; // SkyCraft+ : v38
@@ -246,6 +248,7 @@ public final class Proto {
 	public static final long MS_FOV = 0x40;
 	public static final long MS_BOB_PHASE = 0x44;
 	public static final long MS_BOB_AMOUNT = 0x48;
+	public static final long MS_WORLD_HOUR = 0x4C; // SkyCraft+ : v42, the shared hour of day (0..24), < 0 unknown
 	public static final long MS_EYE_X = 0x50;
 	public static final long MS_EYE_Y = 0x58;
 	public static final long MS_EYE_Z = 0x60;

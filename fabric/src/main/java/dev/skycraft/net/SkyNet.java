@@ -52,6 +52,20 @@ public final class SkyNet {
 		}
 	}
 
+	/**
+	 * SkyCraft+ : v42. Server -> player: this player used a Minecraft bed, so their Skyrim opens its
+	 * own sleep menu (how long to sleep). The bed is only for the log.
+	 */
+	public record Sleep(BlockPos pos) implements CustomPacketPayload {
+		public static final Type<Sleep> TYPE = new Type<>(Identifier.fromNamespaceAndPath(SkyCraft.MOD_ID, "slept_in_bed"));
+		public static final StreamCodec<RegistryFriendlyByteBuf, Sleep> CODEC = StreamCodec.composite(BlockPos.STREAM_CODEC, Sleep::pos, Sleep::new);
+
+		@Override
+		public Type<? extends CustomPacketPayload> type() {
+			return TYPE;
+		}
+	}
+
 	/** SkyCraft+ : server -> guest: the Ender Dragon died in the guest's fight; their Skyrim gets a dragon soul. */
 	public record DragonSoul() implements CustomPacketPayload {
 		public static final Type<DragonSoul> TYPE = new Type<>(Identifier.fromNamespaceAndPath(SkyCraft.MOD_ID, "dragon_soul"));
@@ -114,7 +128,8 @@ public final class SkyNet {
 	 * server; a guest's sends it to the host's.
 	 */
 	public record Act(int kind, int code, float a, float b, BlockPos pos, int face, float hx, float hy, float hz) implements CustomPacketPayload {
-		public static final int USE_BLOCK = 0, HEAL = 1, SKYRIM_HIT = 2, SET_HEALTH = 3, HANDS = 4, BLOCK_HIT = 5, INTO = 6;
+		public static final int USE_BLOCK = 0, HEAL = 1, SKYRIM_HIT = 2, SET_HEALTH = 3, HANDS = 4, BLOCK_HIT = 5, INTO = 6,
+			SLEPT = 7;  // SkyCraft+ : v36. a = the hour its Skyrim woke at; the world clock moves there.
 		public static final Type<Act> TYPE = new Type<>(Identifier.fromNamespaceAndPath(SkyCraft.MOD_ID, "act"));
 		public static final StreamCodec<RegistryFriendlyByteBuf, Act> CODEC = StreamCodec.of((buf, act) -> {
 			buf.writeVarInt(act.kind);
@@ -197,6 +212,41 @@ public final class SkyNet {
 		}
 	}
 
+	/**
+	 * SkyCraft+ : v36. The player is in a Minecraft bed and their own Skyrim has been told (a bed of
+	 * Skyrim's opens its own sleep menu). Skyrim wakes them when it is done; this is what gets them
+	 * out of it whatever else happens (a cancelled menu, a refused one, a link that went quiet).
+	 * Minecraft alone would leave them lying there until every player had slept.
+	 */
+	public static void sleptInBed(ServerPlayer player) {
+		if (player.isSleeping()) {
+			BED_SINCE.put(player.getUUID(), System.nanoTime());
+		}
+	}
+
+	private static final java.util.Map<java.util.UUID, Long> BED_SINCE = new java.util.concurrent.ConcurrentHashMap<>();
+
+	/** SkyCraft+ : v36. Nobody is left waiting in a Minecraft bed: Skyrim is the one that sleeps. */
+	private static void outOfBedIfStuck(net.minecraft.server.MinecraftServer server) {
+		if (BED_SINCE.isEmpty()) {
+			return;
+		}
+		long now = System.nanoTime();
+		for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+			Long since = BED_SINCE.get(player.getUUID());
+			if (since == null) {
+				continue;
+			}
+			if (!player.isSleeping()) {
+				BED_SINCE.remove(player.getUUID());  // (their Skyrim got them up)
+			} else if (now - since > 30_000_000_000L) {
+				BED_SINCE.remove(player.getUUID());
+				player.stopSleepInBed(false, false);
+				SkyCraft.LOG.info("SkyCraft: {} was still lying in a Minecraft bed; standing them up", player.getPlainTextName());
+			}
+		}
+	}
+
 	private static final java.util.Map<java.util.UUID, Integer> SENT_HANDS = new java.util.HashMap<>();
 
 	/** A player's Skyrim hands and what they hold: the host's are read here directly, a guest's came in an Act. */
@@ -265,6 +315,24 @@ public final class SkyNet {
 			// SkyCraft+ : interiors in multiplayer. The guest's Skyrim went into an interior, another
 			// worldspace or back out: its Minecraft player goes to that dimension, as the host's does.
 			case Act.INTO -> into(player, act.code, act.hx, act.hy, act.hz, act.a, act.b);
+			// SkyCraft+ : v36. A sleep or a wait of this player's Skyrim finished: the world's clock
+			// moves to where they woke, and every player's Skyrim follows it (SkySpawner).
+			case Act.SLEPT -> {
+				// SkyCraft+ : v36. This player's Skyrim sleep or wait ended (or their Skyrim's sleep
+				// menu closed without one: a < 0). Their Minecraft body gets up with it - in a world
+				// where not everyone is asleep Minecraft would leave it lying there
+				// (PLAYERS_SLEEPING_PERCENTAGE), and Skyrim is the one that slept. code bit 0: that
+				// client also asked for the world's clock to move to where it woke.
+				if (player.isSleeping()) {
+					player.stopSleepInBed(false, false);
+				}
+				if (act.a >= 0.0F && (act.code & 1) != 0) {
+					var server = player.level().getServer();
+					if (server != null) {
+						dev.skycraft.world.SkySpawner.worldSlept(server, act.a);
+					}
+				}
+			}
 			default -> {
 			}
 		}
@@ -322,6 +390,7 @@ public final class SkyNet {
 		});
 		net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
 			GUEST_HANDS.remove(handler.player.getUUID());
+			BED_SINCE.remove(handler.player.getUUID());
 			server.execute(() -> SENT_HANDS.remove(handler.player.getUUID()));
 		});
 		PayloadTypeRegistry.serverboundPlay().register(Hurt.TYPE, Hurt.CODEC);
@@ -338,11 +407,15 @@ public final class SkyNet {
 		});
 		PayloadTypeRegistry.clientboundPlay().register(Died.TYPE, Died.CODEC);
 		PayloadTypeRegistry.clientboundPlay().register(DragonSoul.TYPE, DragonSoul.CODEC); // SkyCraft+
+		PayloadTypeRegistry.clientboundPlay().register(Sleep.TYPE, Sleep.CODEC);
 		// SkyCraft+ : held items in multiplayer.
 		PayloadTypeRegistry.clientboundPlay().register(HandsOf.TYPE, HandsOf.CODEC);
 		net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents.END_SERVER_TICK.register(server -> {
 			if (server.getTickCount() % 5 == 0) {
 				sendHands(server);
+			}
+			if (server.getTickCount() % 20 == 0) {
+				outOfBedIfStuck(server);  // SkyCraft+ : a Minecraft bed, with Skyrim doing the waking
 			}
 		});
 		ServerPlayNetworking.registerGlobalReceiver(Hurt.TYPE, (payload, context) -> {

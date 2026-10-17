@@ -34,6 +34,7 @@ public final class ModMenuIntegration implements ModMenuApi {
 				RenderToggles.save();
 				DestructionToggle.save();
 				HandMixToggle.save();
+				SleepSyncToggle.save();
 			});
 		ConfigEntryBuilder entries = builder.entryBuilder();
 		builder.getOrCreateCategory(Component.literal("Rendering"))
@@ -63,6 +64,11 @@ public final class ModMenuIntegration implements ModMenuApi {
 				.setDefaultValue(hands[0])
 				.setTooltip(Component.literal(HandMixToggle.TIP))
 				.setSaveConsumer(name -> HandMixToggle.mode = java.util.Arrays.asList(hands).indexOf(name))
+				.build())
+			.addEntry(entries.startBooleanToggle(Component.literal("Sleep moves the world's clock"), SleepSyncToggle.on)
+				.setDefaultValue(true)
+				.setTooltip(Component.literal(SleepSyncToggle.TIP))
+				.setSaveConsumer(on -> SleepSyncToggle.on = on)
 				.build());
 		return builder.build();
 	}

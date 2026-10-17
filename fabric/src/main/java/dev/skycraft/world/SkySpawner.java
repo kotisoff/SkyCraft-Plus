@@ -64,6 +64,8 @@ public final class SkySpawner {
 
 	private static int lastTimeSet = -1;
 	private static int lastWeather = -1;
+	/** SkyCraft+ : v36. A Skyrim sleep just moved the world's clock (System.nanoTime). */
+	private static long sleptAt;
 
 	private record Weighted(EntityType<? extends Mob> type, int weight, int minGroup, int maxGroup) {
 	}
@@ -148,8 +150,12 @@ public final class SkySpawner {
 	/** Minecraft's clock and weather follow Skyrim's (its time doesn't run on its own here). */
 	private static void syncTimeAndWeather(MinecraftServer server) {
 		// Minecraft's day starts at 6am (0) with noon at 6000 and midnight at 18000.
-		int ticks = Math.floorMod(Math.round((SkyWorld.hour() - 6.0F) * 1000.0F), 24000);
-		if (lastTimeSet < 0 || Math.abs(ticks - lastTimeSet) >= 10) {
+		int ticks = SkyClock.ticks(SkyWorld.hour());
+		// SkyCraft+ : v36. Just after a sleep somewhere, the world's clock is the sleep's, not the
+		// host's Skyrim's: hold off until that Skyrim has been brought to it (its own client does that
+		// from the world's clock within a frame), or the old hour would go straight back.
+		boolean afterSleep = System.nanoTime() - sleptAt < 5_000_000_000L;
+		if (!afterSleep && (lastTimeSet < 0 || Math.abs(ticks - lastTimeSet) >= 10)) {
 			lastTimeSet = ticks;
 			server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), "time set " + ticks);
 		}
@@ -166,6 +172,23 @@ public final class SkySpawner {
 
 	private static int countVillagers(ServerLevel level, ServerPlayer player) {
 		return level.getEntitiesOfClass(Villager.class, player.getBoundingBox().inflate(VILLAGER_RANGE), Villager::isAlive).size();
+	}
+
+	/**
+	 * SkyCraft+ : v36. A player's Skyrim slept or waited: the world's clock moves to where they woke,
+	 * and every player's Skyrim is brought to it (each client hands its own Skyrim the shared hour).
+	 * The host's Skyrim drives this clock, so its own push is held off for a moment while it catches
+	 * up (see syncTimeAndWeather).
+	 */
+	public static void worldSlept(MinecraftServer server, float hour) {
+		if (!(hour >= 0.0F) || hour >= 24.0F) {
+			return;  // a guest's client sent nonsense
+		}
+		int ticks = SkyClock.ticks(hour);
+		lastTimeSet = ticks;
+		sleptAt = System.nanoTime();
+		server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), "time set " + ticks);
+		SkyCraft.LOG.info("SkyCraft: a Skyrim slept; the world's clock is now {} (everyone's Skyrim follows)", hour);
 	}
 
 	/**
